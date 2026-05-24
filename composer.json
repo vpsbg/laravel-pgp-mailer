@@ -1,5 +1,6 @@
 {
     "name": "vpsbg/laravel-pgp-mailer",
+    "type": "library",
     "description": "Transparent PGP encryption and signing of Laravel outbound mail.",
     "keywords": [
         "vpsbg",
@@ -19,6 +20,10 @@
             "role": "Developer"
         }
     ],
+    "support": {
+        "issues": "https://github.com/vpsbg/laravel-pgp-mailer/issues",
+        "source": "https://github.com/vpsbg/laravel-pgp-mailer"
+    },
     "require": {
         "php": "^8.2",
         "ext-gnupg": "*",
@@ -76,6 +81,6 @@
             ]
         }
     },
-    "minimum-stability": "dev",
+    "minimum-stability": "stable",
     "prefer-stable": true
 }
