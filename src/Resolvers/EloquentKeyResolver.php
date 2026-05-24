@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Vpsbg\PgpMailer\Resolvers;
 
+use Closure;
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Support\Facades\Cache;
@@ -102,7 +103,7 @@ class EloquentKeyResolver implements KeyResolver
         return $cls;
     }
 
-    protected function fromCacheOr(string $email, \Closure $resolver): ?ArmoredKey
+    protected function fromCacheOr(string $email, Closure $resolver): ?ArmoredKey
     {
         if (! $this->cacheEnabled()) {
             return $resolver();

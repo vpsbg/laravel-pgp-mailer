@@ -90,6 +90,11 @@ class GnupgExtensionEngine
 
         try {
             $g = $this->newHandle();
+            // The handle is a long-lived singleton; clear any signer/encrypter
+            // state left over from prior calls. Without this, a previously
+            // added (and since-scrubbed) signer can fail this call with
+            // "invalid signers found".
+            $this->resetHandleState($g);
             $g->setarmor(1);
 
             foreach ($recipientKeys as $key) {
@@ -140,6 +145,7 @@ class GnupgExtensionEngine
 
         try {
             $g = $this->newHandle();
+            $this->resetHandleState($g);
             $g->setarmor(1);
             $g->setsignmode(GNUPG_SIG_MODE_DETACH);
 
@@ -227,7 +233,7 @@ class GnupgExtensionEngine
                 algorithm: $algorithm,
                 createdAt: $createdAt,
                 expiresAt: $expiresAt,
-                revoked: (bool) ($key['disabled'] ?? false) || (bool) ($primary['revoked'] ?? false),
+                revoked: ! empty($key['disabled']) || ! empty($primary['revoked']),
             );
         } catch (KeyParsingException $e) {
             throw $e;
@@ -242,6 +248,29 @@ class GnupgExtensionEngine
             } catch (Throwable) {
                 // best effort
             }
+        }
+    }
+
+    /**
+     * Clear cached signer/encrypter/decrypter lists on a reused handle so a
+     * subsequent operation doesn't carry stale state from a previous call.
+     * This matters because we delete the secret half of the signing key
+     * after each call (see scrubSecret); the next call must re-add it
+     * fresh, not see the previous (now-invalid) entry.
+     */
+    private function resetHandleState(\gnupg $g): void
+    {
+        // These methods exist on the PECL gnupg extension >= 1.3.0; older
+        // builds may not have them. We suppress errors and fall back to a
+        // best-effort reset.
+        if (method_exists($g, 'clearsignkeys')) {
+            @$g->clearsignkeys();
+        }
+        if (method_exists($g, 'clearencryptkeys')) {
+            @$g->clearencryptkeys();
+        }
+        if (method_exists($g, 'cleardecryptkeys')) {
+            @$g->cleardecryptkeys();
         }
     }
 

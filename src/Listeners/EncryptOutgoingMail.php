@@ -10,24 +10,30 @@ use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Mail\Events\MessageSending;
 use Illuminate\Mail\Mailer;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\Mailer\Envelope;
 use Symfony\Component\Mime\Address;
 use Symfony\Component\Mime\Email;
 use Throwable;
 use Vpsbg\PgpMailer\Contracts\KeyResolver;
 use Vpsbg\PgpMailer\Contracts\MissingKeyPolicy;
+use Vpsbg\PgpMailer\Contracts\SigningKeyResolver;
 use Vpsbg\PgpMailer\Engines\GnupgExtensionEngine;
 use Vpsbg\PgpMailer\Events\PgpEncryptionApplied;
 use Vpsbg\PgpMailer\Events\PgpEncryptionFailed;
+use Vpsbg\PgpMailer\Events\PgpSigningApplied;
 use Vpsbg\PgpMailer\Exceptions\MissingRecipientKeyException;
+use Vpsbg\PgpMailer\Exceptions\MissingSenderKeyException;
 use Vpsbg\PgpMailer\Mime\PgpMimeBuilder;
 use Vpsbg\PgpMailer\Support\ArmoredKey;
 use Vpsbg\PgpMailer\Support\Headers;
+use Vpsbg\PgpMailer\Support\SigningKey;
 
 class EncryptOutgoingMail
 {
     public function __construct(
         protected GnupgExtensionEngine $engine,
         protected KeyResolver $resolver,
+        protected SigningKeyResolver $signingKeyResolver,
         protected ConfigRepository $config,
         protected Application $app,
         protected Dispatcher $events,
@@ -37,34 +43,45 @@ class EncryptOutgoingMail
     public function handle(MessageSending $event): ?bool
     {
         $email = $event->message;
+        $headers = $email->getHeaders();
 
-        if ($email->getHeaders()->has(Headers::SKIP)) {
-            $email->getHeaders()->remove(Headers::SKIP);
+        if ($headers->has(Headers::APPLIED)) {
+            return null;
+        }
+
+        if ($headers->has(Headers::OPT_OUT)) {
+            $headers->remove(Headers::OPT_OUT);
 
             return null;
         }
 
-        if ($email->getHeaders()->has(Headers::APPLIED)) {
+        // Signing is mandatory: without a signing key the package can only
+        // produce plaintext on the wire, which violates the sign-only /
+        // sign+encrypt invariant. Become a no-op so mail flows untouched.
+        if (! $this->signingEnabled()) {
+            $headers->remove(Headers::NO_ENCRYPT);
+
             return null;
         }
 
-        if ($email->getHeaders()->has(Headers::OPT_OUT)) {
-            $email->getHeaders()->remove(Headers::OPT_OUT);
-
-            return null;
-        }
+        $userNoEncrypt = $headers->has(Headers::NO_ENCRYPT);
+        $headers->remove(Headers::NO_ENCRYPT);
 
         $recipients = $this->collectRecipients($email);
         if ($recipients === []) {
             return null;
         }
 
+        if ($userNoEncrypt) {
+            return $this->executeSignOnly($email, $recipients, $this->loadSigningCredentials($email));
+        }
+
         try {
             $keys = $this->resolver->forEmails($recipients);
         } catch (Throwable $e) {
-            $this->log('error', 'key resolution failed; sending plaintext', ['exception' => $e::class]);
+            $this->log('error', 'key resolution failed; falling back to sign-only', ['exception' => $e::class]);
 
-            return null;
+            return $this->executeSignOnly($email, $recipients, $this->loadSigningCredentials($email));
         }
 
         $missing = array_values(array_diff($recipients, array_keys($keys)));
@@ -75,49 +92,79 @@ class EncryptOutgoingMail
             if ($resolution === 'halt') {
                 return false;
             }
-            if ($resolution === 'plaintext') {
-                return null;
+            if ($resolution === 'sign_only') {
+                return $this->executeSignOnly($email, $recipients, $this->loadSigningCredentials($email));
             }
+            // 'continue' — encrypt with the keys we have; split flow handles the rest.
         }
 
-        if ($keys === []) {
+        // Encryption requires signing. Resolve the signing key once and
+        // reuse it: if the sender has no key (UseDefault-with-no-default
+        // or Skip policy), fall through to sign-only — which is itself a
+        // no-op when no key resolves. The Fail policy throws and bubbles.
+        $signingKey = $this->loadSigningCredentials($email);
+
+        if ($keys === [] || $signingKey === null) {
+            return $this->executeSignOnly($email, $recipients, $signingKey);
+        }
+
+        return $this->executeEncrypt($email, $keys, $missing, $policy, $signingKey);
+    }
+
+    /** @param  list<string>  $recipients */
+    private function executeSignOnly(Email $email, array $recipients, ?SigningKey $signingKey): ?bool
+    {
+        if ($signingKey === null) {
+            // signingEnabled() said yes but no key actually resolved for
+            // this sender (no per-sender entry + no default, unreadable
+            // path, or Skip policy). Let the message go untouched.
             return null;
         }
 
+        $body = $email->getBody();
+
         try {
-            $ciphertext = $this->encryptBody($email, $keys);
+            $signature = $this->engine->sign($body->toString(), $signingKey->armored, $signingKey->passphrase);
+        } catch (Throwable $e) {
+            return $this->handleEngineFailure($e, recipients: $recipients);
+        }
+
+        $email->setBody(PgpMimeBuilder::wrapSigned($body, $signature));
+        $email->getHeaders()->addTextHeader(Headers::APPLIED, '1');
+
+        $this->events->dispatch(new PgpSigningApplied(recipients: $recipients));
+
+        return null;
+    }
+
+    /**
+     * @param  array<string, ArmoredKey>  $keys
+     * @param  list<string>  $missing
+     */
+    private function executeEncrypt(
+        Email $email,
+        array $keys,
+        array $missing,
+        MissingKeyPolicy $policy,
+        SigningKey $signingKey,
+    ): ?bool {
+        try {
+            $ciphertext = $this->engine->encrypt(
+                $email->getBody()->toString(),
+                array_values($keys),
+                $signingKey->armored,
+                $signingKey->passphrase,
+            );
         } catch (Throwable $e) {
             $this->events->dispatch(new PgpEncryptionFailed(array_keys($keys), $e));
 
-            $enginePolicy = MissingKeyPolicy::fromConfig(
-                (string) $this->config->get('pgp-mailer.engine_failure_policy', 'drop')
-            );
-
-            $this->log('error', 'encryption failed; applying engine_failure_policy', [
-                'policy' => $enginePolicy->value,
-                'exception' => $e::class,
-            ]);
-
-            if ($enginePolicy === MissingKeyPolicy::Fail) {
-                throw $e;
-            }
-
-            // Drop and Passthrough both short-circuit: we never silently send
-            // plaintext because the engine misbehaved. Only LogOnly opts the
-            // host explicitly into plaintext fallback.
-            if ($enginePolicy === MissingKeyPolicy::LogOnly) {
-                return null;
-            }
-
-            return false;
+            return $this->handleEngineFailure($e);
         }
 
-        $signingActive = $this->signingEnabled();
-        $missingAddresses = $this->extractAddresses($email, $missing);
-
-        if ($missing !== [] && $policy === MissingKeyPolicy::Passthrough && $this->splitRecipientsEnabled()) {
+        if ($missing !== [] && $policy === MissingKeyPolicy::SignOnly && $this->splitRecipientsEnabled()) {
+            $missingAddresses = $this->extractAddresses($email, $missing);
             $this->restrictRecipientsTo($email, array_keys($keys));
-            $this->dispatchPlaintextCopy($email, $missingAddresses);
+            $this->dispatchSecondaryCopy($email, $missingAddresses, $signingKey);
         }
 
         $email->setBody(PgpMimeBuilder::wrap($ciphertext));
@@ -129,30 +176,41 @@ class EncryptOutgoingMail
                 fn (ArmoredKey $k): string => $k->fingerprint->longKeyId(),
                 $keys,
             )),
-            signed: $signingActive,
+            signed: true,
         ));
 
         return null;
     }
 
-    /** @param  array<string, ArmoredKey>  $keys */
-    private function encryptBody(Email $email, array $keys): string
+    /** @param  list<string>  $recipients */
+    private function handleEngineFailure(Throwable $e, array $recipients = []): bool
     {
-        $inner = $email->getBody()->toString();
+        // A misconfigured per-sender signing map (unmatched_sender_policy=fail)
+        // is an operator error, not a transient engine failure. Bubble it up
+        // so the caller sees it rather than silently dropping the send.
+        if ($e instanceof MissingSenderKeyException) {
+            throw $e;
+        }
 
-        [$signingArmored, $passphrase] = $this->loadSigningCredentials();
+        $policy = (string) $this->config->get('pgp-mailer.engine_failure_policy', 'drop');
 
-        return $this->engine->encrypt(
-            $inner,
-            array_values($keys),
-            $signingArmored,
-            $passphrase,
-        );
+        $this->log('error', 'pgp operation failed; applying engine_failure_policy', [
+            'policy' => $policy,
+            'exception' => $e::class,
+            'recipients' => $recipients,
+        ]);
+
+        if ($policy === 'fail') {
+            throw $e;
+        }
+
+        return false;
     }
 
     /**
-     * Returns 'halt' (drop the send), 'plaintext' (allow plaintext through),
-     * or 'continue' (proceed with the keys we have).
+     * Returns 'halt' (drop the send), 'sign_only' (whole audience falls
+     * back to multipart/signed), or 'continue' (proceed with the keys we
+     * have; the caller decides whether to split the unkeyed copy).
      *
      * @param  list<string>  $missing
      */
@@ -170,17 +228,8 @@ class EncryptOutgoingMail
 
                 return 'halt';
 
-            case MissingKeyPolicy::LogOnly:
-                $this->log('warning', 'sending plaintext; recipients have no PGP key', ['emails' => $missing]);
-
-                return 'plaintext';
-
-            case MissingKeyPolicy::Passthrough:
-                if (! $this->splitRecipientsEnabled()) {
-                    return 'plaintext';
-                }
-
-                return 'continue';
+            case MissingKeyPolicy::SignOnly:
+                return $this->splitRecipientsEnabled() ? 'continue' : 'sign_only';
         }
     }
 
@@ -231,8 +280,15 @@ class EncryptOutgoingMail
         }
     }
 
-    /** @param  array{to: list<Address>, cc: list<Address>, bcc: list<Address>}  $missingAddresses */
-    private function dispatchPlaintextCopy(Email $email, array $missingAddresses): void
+    /**
+     * Build and dispatch the multipart/signed copy to recipients without
+     * keys. Sent via the Symfony transport directly (not through
+     * Mailer::send) so the MessageSending event does NOT re-fire — we've
+     * already decided what this copy should be.
+     *
+     * @param  array{to: list<Address>, cc: list<Address>, bcc: list<Address>}  $missingAddresses
+     */
+    private function dispatchSecondaryCopy(Email $email, array $missingAddresses, SigningKey $signingKey): void
     {
         if ($missingAddresses['to'] === [] && $missingAddresses['cc'] === [] && $missingAddresses['bcc'] === []) {
             return;
@@ -242,56 +298,71 @@ class EncryptOutgoingMail
         $copy->to(...$missingAddresses['to']);
         $copy->cc(...$missingAddresses['cc']);
         $copy->bcc(...$missingAddresses['bcc']);
-        $copy->getHeaders()->addTextHeader(Headers::SKIP, '1');
 
         try {
-            $this->app->make(Mailer::class)->sendRawSymfonyMessage($copy);
+            $body = $copy->getBody();
+            $signature = $this->engine->sign($body->toString(), $signingKey->armored, $signingKey->passphrase);
+            $copy->setBody(PgpMimeBuilder::wrapSigned($body, $signature));
+            $copy->getHeaders()->addTextHeader(Headers::APPLIED, '1');
+            $this->events->dispatch(new PgpSigningApplied(recipients: $this->collectRecipients($copy)));
         } catch (Throwable $e) {
-            $this->log('error', 'plaintext fallback dispatch failed', ['exception' => $e::class]);
+            $this->log('error', 'signing the secondary copy failed; dropping it', [
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
+
+            return;
+        }
+
+        try {
+            $mailer = $this->app->make(Mailer::class);
+            $transport = $mailer->getSymfonyTransport();
+            $transport->send($copy, Envelope::create($copy));
+        } catch (Throwable $e) {
+            $this->log('error', 'secondary-copy dispatch failed', ['exception' => $e::class]);
         }
     }
 
+    /**
+     * Cheap master-switch check: signing is configured if it's enabled AND
+     * at least one of (default key, default key_path, per-sender entries)
+     * is present. The actual per-message key lookup happens in
+     * loadSigningCredentials() via the SigningKeyResolver.
+     */
     private function signingEnabled(): bool
     {
         if (! (bool) $this->config->get('pgp-mailer.signing.enabled', false)) {
             return false;
         }
 
-        return $this->config->get('pgp-mailer.signing.key_path') || $this->config->get('pgp-mailer.signing.key');
+        if ($this->config->get('pgp-mailer.signing.key_path')
+            || $this->config->get('pgp-mailer.signing.key')) {
+            return true;
+        }
+
+        $senders = $this->config->get('pgp-mailer.signing.senders');
+
+        return is_array($senders) && $senders !== [];
     }
 
-    /** @return array{0: ?string, 1: ?string} [armoredPrivateKey, passphrase] */
-    private function loadSigningCredentials(): array
+    /**
+     * Resolve the signing key to use for this specific message. Looks at
+     * the Email's From header and asks the SigningKeyResolver. Returns null
+     * when no key is configured for this sender and the resolver's policy
+     * is UseDefault-with-no-default or Skip; throws MissingSenderKeyException
+     * when the policy is Fail.
+     */
+    private function loadSigningCredentials(Email $email): ?SigningKey
     {
-        if (! $this->signingEnabled()) {
-            return [null, null];
-        }
+        $from = $email->getFrom();
+        $fromAddress = $from !== [] ? strtolower($from[0]->getAddress()) : null;
 
-        $path = $this->config->get('pgp-mailer.signing.key_path');
-        $inline = $this->config->get('pgp-mailer.signing.key');
-        $passphrase = $this->config->get('pgp-mailer.signing.passphrase');
-
-        if (is_string($path) && $path !== '') {
-            if (! is_readable($path)) {
-                $this->log('error', 'signing key path is not readable; signing disabled', ['path' => $path]);
-
-                return [null, null];
-            }
-            $armored = file_get_contents($path) ?: null;
-        } else {
-            $armored = is_string($inline) ? $inline : null;
-        }
-
-        if ($armored === null || $armored === '') {
-            return [null, null];
-        }
-
-        return [$armored, is_string($passphrase) ? $passphrase : null];
+        return $this->signingKeyResolver->forSender($fromAddress);
     }
 
     private function splitRecipientsEnabled(): bool
     {
-        return (bool) $this->config->get('pgp-mailer.passthrough.split_recipients', true);
+        return (bool) $this->config->get('pgp-mailer.sign_only.split_recipients', true);
     }
 
     /** @param  array<string, mixed>  $context */

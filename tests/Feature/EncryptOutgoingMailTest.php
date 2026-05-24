@@ -10,8 +10,10 @@ use Symfony\Component\Mime\Email;
 use Vpsbg\PgpMailer\Engines\GnupgExtensionEngine;
 use Vpsbg\PgpMailer\Events\PgpEncryptionApplied;
 use Vpsbg\PgpMailer\Events\PgpEncryptionFailed;
+use Vpsbg\PgpMailer\Events\PgpSigningApplied;
 use Vpsbg\PgpMailer\Exceptions\EncryptionFailedException;
 use Vpsbg\PgpMailer\Exceptions\MissingRecipientKeyException;
+use Vpsbg\PgpMailer\Mime\PgpSignedPart;
 use Vpsbg\PgpMailer\Models\PgpKey;
 use Vpsbg\PgpMailer\PgpMailer;
 use Vpsbg\PgpMailer\Tests\Stubs\PlainMailable;
@@ -51,15 +53,18 @@ it('encrypts mail destined for a recipient that has a stored key', function (): 
     expect(recoverEncrypted($serialized, $this->keys['private']))->toContain('the encrypted payload');
 });
 
-it('does not encrypt when no recipient has a key (passthrough policy)', function (): void {
+it('signs (does not encrypt) when no recipient has a key under sign_only policy', function (): void {
     PgpKey::query()->delete();
-    config()->set('pgp-mailer.missing_key_policy', 'passthrough');
+    config()->set('pgp-mailer.missing_key_policy', 'sign_only');
 
-    Mail::to($this->recipientEmail)->send(new PlainMailable('plaintext please'));
+    Mail::to($this->recipientEmail)->send(new PlainMailable('sign-only body'));
 
     $sent = sentMessages();
     expect($sent)->toHaveCount(1);
-    expect($sent[0]->getOriginalMessage()->toString())->toContain('plaintext please');
+
+    $serialized = $sent[0]->getOriginalMessage()->toString();
+    expect($serialized)->toContain('multipart/signed');
+    expect($serialized)->toContain('sign-only body');
 });
 
 it('fail policy throws MissingRecipientKeyException and sends nothing', function (): void {
@@ -85,24 +90,13 @@ it('drop policy short-circuits without sending', function (): void {
     expect(sentMessages())->toHaveCount(0);
 });
 
-it('log_only policy sends plaintext', function (): void {
-    PgpKey::query()->delete();
-    config()->set('pgp-mailer.missing_key_policy', 'log_only');
-
-    Mail::to($this->recipientEmail)->send(new PlainMailable('plaintext via log_only'));
-
-    $sent = sentMessages();
-    expect($sent)->toHaveCount(1);
-    expect($sent[0]->getOriginalMessage()->toString())->toContain('plaintext via log_only');
-});
-
 it('encrypts to Bcc recipients too', function (): void {
     Mail::to('nobody-with-no-key@example.com')
         ->bcc($this->recipientEmail)
         ->send(new PlainMailable('bcc test payload'));
 
-    // Mixed audience + default passthrough+split_recipients → encrypt for
-    // the keyed Bcc, re-dispatch plaintext for the rest.
+    // Mixed audience + default sign_only+split_recipients → encrypt for
+    // the keyed Bcc, re-dispatch a multipart/signed copy for the rest.
     $sent = sentMessages();
     expect(count($sent))->toBeGreaterThanOrEqual(1);
 
@@ -164,11 +158,9 @@ it('preserves attachments through the encryption round-trip', function (): void 
 // Engine-failure policy: under default config, a throwing engine MUST NOT
 // silently downgrade to plaintext.
 
-it('default engine_failure_policy refuses to send plaintext on engine throw', function (): void {
+it('default engine_failure_policy halts the send when encryption throws', function (): void {
     bindThrowingEngine();
     Event::fake([PgpEncryptionFailed::class]);
-
-    config()->set('pgp-mailer.missing_key_policy', 'passthrough');
 
     Mail::to($this->recipientEmail)->send(new PlainMailable('SHOULD NOT LEAK'));
 
@@ -184,17 +176,6 @@ it('engine_failure_policy=fail re-throws the engine exception', function (): voi
         ->toThrow(EncryptionFailedException::class);
 
     expect(sentMessages())->toHaveCount(0);
-});
-
-it('engine_failure_policy=log_only is the only path that allows plaintext fallback', function (): void {
-    bindThrowingEngine();
-    config()->set('pgp-mailer.engine_failure_policy', 'log_only');
-
-    Mail::to($this->recipientEmail)->send(new PlainMailable('explicit plaintext'));
-
-    $sent = sentMessages();
-    expect($sent)->toHaveCount(1);
-    expect($sent[0]->getOriginalMessage()->toString())->toContain('explicit plaintext');
 });
 
 // Mailable-native opt-out (recommended for Mailables you own).
@@ -245,6 +226,169 @@ it('PgpMailer::skip is idempotent', function (): void {
     expect($serialized)->toContain('double-skip payload');
 });
 
+// === SignOnly mode =====================================================
+//
+// When signing is configured and a recipient has no key, the listener
+// should produce a multipart/signed body rather than plaintext. This is
+// the central upgrade introduced alongside the X-Pgp-Mailer-No-Encrypt
+// opt-out.
+
+it('signs when recipient has no key and signing is configured', function (): void {
+    PgpKey::query()->delete();
+    config()->set('pgp-mailer.missing_key_policy', 'sign_only');
+
+    Event::fake([PgpSigningApplied::class, PgpEncryptionApplied::class]);
+
+    Mail::to($this->recipientEmail)->send(new PlainMailable('sign-only body'));
+
+    $sent = sentMessages();
+    expect($sent)->toHaveCount(1);
+
+    $email = $sent[0]->getOriginalMessage();
+    $serialized = $email->toString();
+
+    expect($serialized)->toContain('multipart/signed');
+    expect($serialized)->toContain('protocol="application/pgp-signature"');
+    expect($serialized)->toContain('micalg=pgp-sha256');
+    expect($serialized)->toContain('-----BEGIN PGP SIGNATURE-----');
+    // Body is in the clear because the message isn't encrypted.
+    expect($serialized)->toContain('sign-only body');
+
+    Event::assertDispatched(PgpSigningApplied::class);
+    Event::assertNotDispatched(PgpEncryptionApplied::class);
+
+    // Cryptographic round-trip: detached signature verifies against the
+    // signed body bytes.
+    expect(verifyDetached($email, $this->keys['private']))->toBeTrue();
+});
+
+it('listener is a no-op when signing is not configured', function (): void {
+    // Even with a recipient key present, the listener short-circuits when
+    // signing isn't configured globally — the package only operates in
+    // sign-only or sign+encrypt modes, so without signing it does nothing.
+    config()->set('pgp-mailer.signing.enabled', false);
+    config()->set('pgp-mailer.signing.key', null);
+
+    Mail::to($this->recipientEmail)->send(new PlainMailable('cleartext payload'));
+
+    $sent = sentMessages();
+    expect($sent)->toHaveCount(1);
+
+    $serialized = $sent[0]->getOriginalMessage()->toString();
+    expect($serialized)->not->toContain('multipart/signed');
+    expect($serialized)->not->toContain('multipart/encrypted');
+    expect($serialized)->toContain('cleartext payload');
+    expect($serialized)->not->toContain('X-Pgp-Mailer-Applied');
+});
+
+// === Split-recipients path with signing ================================
+//
+// Mixed audience + passthrough+split + signing configured: the keyed
+// portion gets encrypted-and-signed; the unkeyed portion gets a separate
+// multipart/signed copy (not plaintext).
+
+it('encrypts to keyed recipients and signs the copy to unkeyed', function (): void {
+    config()->set('pgp-mailer.missing_key_policy', 'sign_only');
+
+    Mail::to('nobody-with-no-key@example.com')
+        ->bcc($this->recipientEmail)
+        ->send(new PlainMailable('split signed payload'));
+
+    $sent = sentMessages();
+    expect(count($sent))->toBe(2);
+
+    $encrypted = null;
+    $signed = null;
+    foreach ($sent as $msg) {
+        $s = $msg->getOriginalMessage()->toString();
+        if (str_contains($s, 'multipart/encrypted')) {
+            $encrypted = $msg->getOriginalMessage();
+        } elseif (str_contains($s, 'multipart/signed')) {
+            $signed = $msg->getOriginalMessage();
+        }
+    }
+
+    expect($encrypted)->not->toBeNull('expected one encrypted message for the keyed recipient');
+    expect($signed)->not->toBeNull('expected one signed-only message for the unkeyed recipient');
+
+    expect($signed->toString())->toContain('split signed payload');
+    expect($signed->toString())->not->toContain('X-Pgp-Mailer-No-Encrypt');
+});
+
+it('falls back to one signed message for everyone when split_recipients is disabled', function (): void {
+    config()->set('pgp-mailer.missing_key_policy', 'sign_only');
+    config()->set('pgp-mailer.sign_only.split_recipients', false);
+
+    Mail::to('nobody-with-no-key@example.com')
+        ->bcc($this->recipientEmail)
+        ->send(new PlainMailable('mixed audience payload'));
+
+    $sent = sentMessages();
+    expect(count($sent))->toBe(1);
+
+    $serialized = $sent[0]->getOriginalMessage()->toString();
+    expect($serialized)->toContain('multipart/signed');
+    expect($serialized)->not->toContain('multipart/encrypted');
+    expect($serialized)->toContain('mixed audience payload');
+});
+
+// === X-Pgp-Mailer-No-Encrypt opt-out ===================================
+
+it('PgpMailer::unencrypted produces multipart/signed when signing is configured', function (): void {
+    $mailable = new PlainMailable('unencrypted but signed');
+
+    Mail::to($this->recipientEmail)->send(PgpMailer::unencrypted($mailable));
+
+    $sent = sentMessages();
+    expect($sent)->toHaveCount(1);
+
+    $serialized = $sent[0]->getOriginalMessage()->toString();
+    expect($serialized)->toContain('multipart/signed');
+    expect($serialized)->not->toContain('multipart/encrypted');
+    expect($serialized)->toContain('unencrypted but signed');
+    expect($serialized)->not->toContain('X-Pgp-Mailer-No-Encrypt');
+});
+
+it('PgpMailer::unencrypted is a no-op (and strips the header) when signing is off', function (): void {
+    // With no signing configured the listener is a no-op end-to-end, so
+    // ::unencrypted() effectively collapses into ::skip(). We still strip
+    // the opt-out header from the outgoing message either way.
+    config()->set('pgp-mailer.signing.enabled', false);
+    config()->set('pgp-mailer.signing.key', null);
+
+    Mail::to($this->recipientEmail)->send(PgpMailer::unencrypted(new PlainMailable('plain announcement')));
+
+    $sent = sentMessages();
+    expect($sent)->toHaveCount(1);
+
+    $serialized = $sent[0]->getOriginalMessage()->toString();
+    expect($serialized)->not->toContain('multipart/signed');
+    expect($serialized)->not->toContain('multipart/encrypted');
+    expect($serialized)->toContain('plain announcement');
+    expect($serialized)->not->toContain('X-Pgp-Mailer-No-Encrypt');
+});
+
+it('PgpMailer::unencrypted returns the same Mailable instance', function (): void {
+    $mailable = new PlainMailable('whatever');
+
+    expect(PgpMailer::unencrypted($mailable))->toBe($mailable);
+});
+
+it('honors X-Pgp-Mailer-No-Encrypt set via raw header on the message', function (): void {
+    // Recipient HAS a key, but the message asked for no encryption.
+    Mail::raw('header-driven announcement', function ($message): void {
+        $message->to($this->recipientEmail);
+        $message->subject('opt-out-encrypt');
+        $message->getSymfonyMessage()->getHeaders()->addTextHeader('X-Pgp-Mailer-No-Encrypt', '1');
+    });
+
+    $serialized = sentMessages()[0]->getOriginalMessage()->toString();
+    expect($serialized)->toContain('multipart/signed');
+    expect($serialized)->not->toContain('multipart/encrypted');
+    expect($serialized)->toContain('header-driven announcement');
+    expect($serialized)->not->toContain('X-Pgp-Mailer-No-Encrypt');
+});
+
 it('skips encryption when the X-Pgp-Mailer-Disable header is set', function (): void {
     Mail::raw('opt-out payload', function ($message): void {
         $message->to($this->recipientEmail);
@@ -256,6 +400,162 @@ it('skips encryption when the X-Pgp-Mailer-Disable header is set', function (): 
     expect($serialized)->not->toContain('-----BEGIN PGP MESSAGE-----');
     expect($serialized)->toContain('opt-out payload');
     expect($serialized)->not->toContain('X-Pgp-Mailer-Disable');
+});
+
+// === Per-sender signing keys ===========================================
+//
+// signing.senders lets a host pair From addresses to distinct signing
+// keys, so support@app is signed by the support key and billing@app by
+// the billing key. Lookups fall back to the scalar default or apply
+// signing.unmatched_sender_policy.
+
+it('signs with the per-sender key that matches the From address', function (): void {
+    $alt = $this->fixtureAltKeys();
+    $altEmail = $this->fixtureAltEmail();
+
+    config()->set('pgp-mailer.signing.enabled', true);
+    config()->set('pgp-mailer.signing.key', null);
+    config()->set('pgp-mailer.signing.senders', [
+        $altEmail => ['key' => $alt['private']],
+    ]);
+
+    Mail::raw('per-sender signed body', function ($m) use ($altEmail): void {
+        $m->from($altEmail);
+        $m->to($this->recipientEmail);
+        $m->subject('per-sender');
+    });
+
+    $serialized = sentMessages()[0]->getOriginalMessage()->toString();
+    [$plaintext, $info] = gnupgDecryptVerify(
+        extractArmoredCiphertext($serialized),
+        $this->keys['private'],
+        [$alt['public']],
+    );
+
+    expect($plaintext)->toContain('per-sender signed body');
+    expect($info)->not->toBeEmpty();
+    // Signer fingerprint MUST be the alt key's, not the recipient's.
+    expect(strtoupper((string) $info[0]['fingerprint']))
+        ->toBe('A244A8EBB89975334876F26B5B7779EBB683C76D');
+});
+
+it('matches From addresses case-insensitively against signing.senders', function (): void {
+    $alt = $this->fixtureAltKeys();
+
+    config()->set('pgp-mailer.signing.enabled', true);
+    config()->set('pgp-mailer.signing.key', null);
+    config()->set('pgp-mailer.signing.senders', [
+        'Support@Example.com' => ['key' => $alt['private']],
+    ]);
+
+    Mail::raw('case test', function ($m): void {
+        $m->from('SUPPORT@EXAMPLE.COM');
+        $m->to($this->recipientEmail);
+        $m->subject('case');
+    });
+
+    [$plaintext, $info] = gnupgDecryptVerify(
+        extractArmoredCiphertext(sentMessages()[0]->getOriginalMessage()->toString()),
+        $this->keys['private'],
+        [$alt['public']],
+    );
+
+    expect($plaintext)->toContain('case test');
+    expect(strtoupper((string) $info[0]['fingerprint']))
+        ->toBe('A244A8EBB89975334876F26B5B7779EBB683C76D');
+});
+
+it('falls back to the default signing key when From has no senders entry (use_default)', function (): void {
+    config()->set('pgp-mailer.signing.enabled', true);
+    config()->set('pgp-mailer.signing.key', $this->keys['private']);
+    config()->set('pgp-mailer.signing.senders', [
+        'support@example.com' => ['key' => $this->fixtureAltKeys()['private']],
+    ]);
+    config()->set('pgp-mailer.signing.unmatched_sender_policy', 'use_default');
+
+    Mail::raw('default fallback body', function ($m): void {
+        $m->from('someone-else@example.com');
+        $m->to($this->recipientEmail);
+        $m->subject('default fallback');
+    });
+
+    [, $info] = gnupgDecryptVerify(
+        extractArmoredCiphertext(sentMessages()[0]->getOriginalMessage()->toString()),
+        $this->keys['private'],
+    );
+
+    // Signed by the default key (== recipient key in this test, fpr 5C86...).
+    expect(strtoupper((string) $info[0]['fingerprint']))
+        ->toBe('5C86E8EFCD946F05FDCC99A3F6AD4E436EB07FD0');
+});
+
+it('is a no-op for senders without a key under unmatched_sender_policy=skip', function (): void {
+    // unmatched_sender_policy=skip is an explicit operator opt-in to "do
+    // nothing for senders not in the per-sender map." Since encryption
+    // requires signing, the listener falls all the way through and the
+    // message goes out untouched — even when the recipient has a key.
+    config()->set('pgp-mailer.signing.enabled', true);
+    config()->set('pgp-mailer.signing.key', null);
+    config()->set('pgp-mailer.signing.senders', [
+        'support@example.com' => ['key' => $this->keys['private']],
+    ]);
+    config()->set('pgp-mailer.signing.unmatched_sender_policy', 'skip');
+
+    Mail::raw('skip-signing body', function ($m): void {
+        $m->from('orphan@example.com');
+        $m->to($this->recipientEmail);
+        $m->subject('skip');
+    });
+
+    $sent = sentMessages();
+    expect($sent)->toHaveCount(1);
+
+    $serialized = $sent[0]->getOriginalMessage()->toString();
+    expect($serialized)->not->toContain('multipart/encrypted');
+    expect($serialized)->not->toContain('multipart/signed');
+    expect($serialized)->toContain('skip-signing body');
+});
+
+it('throws MissingSenderKeyException under unmatched_sender_policy=fail', function (): void {
+    config()->set('pgp-mailer.signing.enabled', true);
+    config()->set('pgp-mailer.signing.key', null);
+    config()->set('pgp-mailer.signing.senders', [
+        'support@example.com' => ['key' => $this->keys['private']],
+    ]);
+    config()->set('pgp-mailer.signing.unmatched_sender_policy', 'fail');
+
+    expect(function (): void {
+        Mail::raw('would never send', function ($m): void {
+            $m->from('orphan@example.com');
+            $m->to($this->recipientEmail);
+            $m->subject('fail');
+        });
+    })->toThrow(\Vpsbg\PgpMailer\Exceptions\MissingSenderKeyException::class);
+
+    expect(sentMessages())->toHaveCount(0);
+});
+
+it('preserves the legacy single-key install when senders is empty', function (): void {
+    // The pre-existing test "signs when signing is enabled in config" already
+    // covers this, but assert the new resolver path is transparent: with no
+    // senders entries and a scalar key, every From signs with the scalar.
+    config()->set('pgp-mailer.signing.enabled', true);
+    config()->set('pgp-mailer.signing.key', $this->keys['private']);
+    config()->set('pgp-mailer.signing.senders', []);
+
+    Mail::raw('legacy single-key', function ($m): void {
+        $m->from('whoever@example.com');
+        $m->to($this->recipientEmail);
+        $m->subject('legacy');
+    });
+
+    [, $info] = gnupgDecryptVerify(
+        extractArmoredCiphertext(sentMessages()[0]->getOriginalMessage()->toString()),
+        $this->keys['private'],
+    );
+
+    expect(strtoupper((string) $info[0]['fingerprint']))
+        ->toBe('5C86E8EFCD946F05FDCC99A3F6AD4E436EB07FD0');
 });
 
 function bindThrowingEngine(): void
@@ -308,13 +608,65 @@ function recoverEncrypted(string $serializedMime, string $privateKeyArmored): st
 }
 
 /**
+ * Verify the detached PGP signature on a multipart/signed Email. Returns
+ * true when the signature verifies against the signed body bytes. Uses the
+ * in-memory Symfony parts (not the serialized output) so we sign exactly
+ * what Symfony will emit between the boundaries.
+ */
+function verifyDetached(Email $email, string $privateKeyArmored): bool
+{
+    $body = $email->getBody();
+    if (! $body instanceof PgpSignedPart) {
+        throw new RuntimeException('Email body is not a PgpSignedPart');
+    }
+
+    [$signedPart, $sigPart] = $body->getParts();
+    $signedBytes = $signedPart->toString();
+    $signatureArmor = $sigPart->bodyToString();
+
+    $homedir = sys_get_temp_dir().'/pgp-mailer-verify-'.bin2hex(random_bytes(6));
+    mkdir($homedir, 0700, true);
+    file_put_contents($homedir.'/gpg.conf', "pinentry-mode loopback\ntrust-model always\n");
+    file_put_contents($homedir.'/gpg-agent.conf', "allow-loopback-pinentry\n");
+
+    try {
+        $g = new gnupg(['home_dir' => $homedir]);
+        $g->seterrormode(GNUPG_ERROR_EXCEPTION);
+        $g->import($privateKeyArmored);
+        $info = $g->verify($signedBytes, $signatureArmor);
+
+        return is_array($info) && $info !== [] && ! empty($info[0]['fingerprint']);
+    } finally {
+        $rm = function (string $p) use (&$rm): void {
+            if (! is_dir($p)) {
+                return;
+            }
+            foreach (scandir($p) as $e) {
+                if ($e === '.' || $e === '..') {
+                    continue;
+                }
+                $f = $p.'/'.$e;
+                is_dir($f) && ! is_link($f) ? $rm($f) : @unlink($f);
+            }
+            @rmdir($p);
+        };
+        $rm($homedir);
+    }
+}
+
+/**
  * Decrypt with the gnupg PECL extension in a throwaway homedir. Returns
  * [plaintext, signaturesInfo]. signaturesInfo is empty when the ciphertext
  * isn't signed; non-empty (one entry per signer) when it is.
  *
+ * Pass `$extraPublicKeysArmored` to import additional public keys into the
+ * verifier's keyring — needed when the message was signed by a key that is
+ * not the recipient's own private key.
+ *
+ * @param  list<string>  $extraPublicKeysArmored
  * @return array{0: string, 1: array<int, array<string, mixed>>}
  */
-function gnupgDecryptVerify(string $armoredCiphertext, string $privateKeyArmored): array
+function gnupgDecryptVerify(string $armoredCiphertext, string $privateKeyArmored, array $extraPublicKeysArmored = []): array
 {
     $homedir = sys_get_temp_dir().'/pgp-mailer-decrypt-'.bin2hex(random_bytes(6));
     mkdir($homedir, 0700, true);
@@ -330,6 +682,10 @@ function gnupgDecryptVerify(string $armoredCiphertext, string $privateKeyArmored
             throw new RuntimeException('Failed to import decryption key');
         }
         $g->adddecryptkey($imported['fingerprint'], '');
+
+        foreach ($extraPublicKeysArmored as $pub) {
+            $g->import($pub);
+        }
 
         // Try signature-bearing decrypt first; fall back to plain decrypt
         // when the ciphertext is unsigned.

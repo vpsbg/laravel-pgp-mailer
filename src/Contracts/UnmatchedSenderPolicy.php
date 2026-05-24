@@ -4,14 +4,14 @@ declare(strict_types=1);
 
 namespace Vpsbg\PgpMailer\Contracts;
 
-enum MissingKeyPolicy: string
+enum UnmatchedSenderPolicy: string
 {
-    case SignOnly = 'sign_only';
+    case UseDefault = 'use_default';
+    case Skip = 'skip';
     case Fail = 'fail';
-    case Drop = 'drop';
 
     public static function fromConfig(?string $value): self
     {
-        return self::tryFrom((string) $value) ?? self::SignOnly;
+        return self::tryFrom((string) $value) ?? self::UseDefault;
     }
 }
