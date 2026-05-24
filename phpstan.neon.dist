@@ -2,9 +2,27 @@ includes:
     - phpstan-baseline.neon
 
 parameters:
-    level: 5
+    level: 8
     paths:
         - src
         - config
         - database
+    excludePaths:
+        # The HasPgpKey trait targets host user models, so phpstan can't infer
+        # the using class and would flag every $this->email / $this->getKey().
+        # Runtime behavior is covered by tests/Stubs/User.
+        - src/Concerns/HasPgpKey.php
+    stubFiles:
+        # Stub for the `gnupg` PECL extension. ext-gnupg is a composer require,
+        # but phpstan can still analyze on hosts where the extension isn't loaded.
+        - stubs/gnupg.stub
     tmpDir: build/phpstan
+    ignoreErrors:
+        # Package config files live in config/; the rule targets app-level config dirs.
+        -
+            identifier: larastan.noEnvCallsOutsideOfConfig
+            path: config/pgp-mailer.php
+        # Mailer::sendRawSymfonyMessage exists in Laravel 11+ but is missing from larastan stubs.
+        -
+            message: '#Call to an undefined method Illuminate\\Mail\\Mailer::sendRawSymfonyMessage\(\)#'
+            path: src/Listeners/EncryptOutgoingMail.php

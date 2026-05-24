@@ -1,0 +1,49 @@
+<?php
+
+/**
+ * Minimal phpstan stub for the optional `gnupg` PECL extension.
+ *
+ * The extension is not declared as a required composer dependency (the engine
+ * checks `extension_loaded('gnupg')` at construction and throws if absent),
+ * so phpstan analysis runs against hosts that may not have it installed.
+ * This stub declares only the methods GnupgExtensionEngine actually calls.
+ */
+class gnupg
+{
+    /** @param array<string, mixed> $options */
+    public function __construct(array $options = []) {}
+
+    public function seterrormode(int $errormode): void {}
+
+    public function setarmor(int $armor): bool { return true; }
+
+    public function setsignmode(int $signmode): bool { return true; }
+
+    public function addencryptkey(string $fingerprint): bool { return true; }
+
+    public function addsignkey(string $fingerprint, ?string $passphrase = null): bool { return true; }
+
+    // Return shapes deliberately broad: the actual extension surface varies
+    // by version (e.g. `algorithm` vs `pubkey_algo` on subkeys), and the
+    // engine's defensive `?? default` patterns rely on phpstan not assuming
+    // any field is guaranteed present.
+
+    /** @return array<string, mixed>|false */
+    public function import(string $key): array|false { return ['fingerprint' => '']; }
+
+    /** @return array<int, array<string, mixed>> */
+    public function keyinfo(string $pattern): array { return []; }
+
+    public function encrypt(string $plaintext): string|false { return ''; }
+
+    public function encryptsign(string $plaintext): string|false { return ''; }
+
+    public function sign(string $plaintext): string|false { return ''; }
+
+    public function deletekey(string $key, bool $allow_secret = false): bool { return true; }
+}
+
+const GNUPG_ERROR_EXCEPTION = 2;
+const GNUPG_SIG_MODE_NORMAL = 0;
+const GNUPG_SIG_MODE_DETACH = 1;
+const GNUPG_SIG_MODE_CLEAR = 2;

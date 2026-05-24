@@ -24,6 +24,9 @@ _ide_helper_models.php
 /.fleet
 /.vscode
 
+# Claude Code workspace (per-machine, not for VCS)
+/.claude
+
 # Misc
 phpunit.xml
 phpstan.neon
