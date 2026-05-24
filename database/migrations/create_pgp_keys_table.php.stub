@@ -1,0 +1,32 @@
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create(config('pgp-mailer.table', 'pgp_keys'), function (Blueprint $table) {
+            $table->id();
+            $table->string('email')->unique();
+            $table->text('public_key');
+            $table->string('fingerprint', 64)->index();
+            $table->string('algorithm')->nullable();
+            $table->timestamp('key_created_at')->nullable();
+            $table->timestamp('expires_at')->nullable();
+            $table->timestamp('revoked_at')->nullable();
+            $table->timestamp('last_verified_at')->nullable();
+            $table->timestamp('uid_mismatch_at')->nullable();
+            $table->timestamps();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists(config('pgp-mailer.table', 'pgp_keys'));
+    }
+};

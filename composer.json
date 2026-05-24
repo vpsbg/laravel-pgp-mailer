@@ -1,48 +1,62 @@
 {
-    "name": ":vendor_slug/:package_slug",
-    "description": ":package_description",
+    "name": "vpsbg/laravel-pgp-mailer",
+    "type": "library",
+    "description": "PGP encryption and signing of Laravel outbound mail.",
     "keywords": [
-        ":vendor_name",
+        "vpsbg",
         "laravel",
-        ":package_slug"
+        "pgp",
+        "openpgp",
+        "mail",
+        "encryption",
+        "mime"
     ],
-    "homepage": "https://github.com/:vendor_slug/:package_slug",
+    "homepage": "https://github.com/vpsbg/laravel-pgp-mailer",
     "license": "MIT",
     "authors": [
         {
-            "name": ":author_name",
-            "email": "author@domain.com",
+            "name": "VPSBG",
+            "email": "support@vps.bg",
             "role": "Developer"
         }
     ],
+    "support": {
+        "issues": "https://github.com/vpsbg/laravel-pgp-mailer/issues",
+        "source": "https://github.com/vpsbg/laravel-pgp-mailer"
+    },
     "require": {
-        "php": "^8.4",
+        "php": "^8.2",
+        "ext-gnupg": "*",
+        "ext-mbstring": "*",
+        "illuminate/contracts": "^11.0||^12.0",
+        "illuminate/database": "^11.0||^12.0",
+        "illuminate/mail": "^11.0||^12.0",
+        "illuminate/support": "^11.0||^12.0",
         "spatie/laravel-package-tools": "^1.16",
-        "illuminate/contracts": "^11.0||^12.0||^13.0"
+        "symfony/mime": "^7.0"
     },
     "require-dev": {
-        "laravel/pint": "^1.14",
-        "nunomaduro/collision": "^8.8",
         "larastan/larastan": "^3.0",
-        "orchestra/testbench": "^11.0.0||^10.0.0||^9.0.0",
-        "pestphp/pest": "^4.0",
-        "pestphp/pest-plugin-arch": "^4.0",
-        "pestphp/pest-plugin-laravel": "^4.0",
+        "laravel/pint": "^1.14",
+        "mockery/mockery": "^1.6",
+        "nunomaduro/collision": "^8.8",
+        "orchestra/testbench": "^9.0||^10.0",
+        "pestphp/pest": "^3.0||^4.0",
+        "pestphp/pest-plugin-arch": "^3.0||^4.0",
+        "pestphp/pest-plugin-laravel": "^3.0||^4.0",
         "phpstan/extension-installer": "^1.4",
         "phpstan/phpstan-deprecation-rules": "^2.0",
-        "phpstan/phpstan-phpunit": "^2.0",
-        "spatie/laravel-ray": "^1.35"
+        "phpstan/phpstan-phpunit": "^2.0"
     },
     "autoload": {
         "psr-4": {
-            "VendorName\\Skeleton\\": "src/",
-            "VendorName\\Skeleton\\Database\\Factories\\": "database/factories/"
+            "Vpsbg\\PgpMailer\\": "src/",
+            "Vpsbg\\PgpMailer\\Database\\Factories\\": "database/factories/"
         }
     },
     "autoload-dev": {
         "psr-4": {
-            "VendorName\\Skeleton\\Tests\\": "tests/",
-            "Workbench\\App\\": "workbench/app/"
+            "Vpsbg\\PgpMailer\\Tests\\": "tests/"
         }
     },
     "scripts": {
@@ -63,13 +77,10 @@
     "extra": {
         "laravel": {
             "providers": [
-                "VendorName\\Skeleton\\SkeletonServiceProvider"
-            ],
-            "aliases": {
-                "Skeleton": "VendorName\\Skeleton\\Facades\\Skeleton"
-            }
+                "Vpsbg\\PgpMailer\\PgpMailerServiceProvider"
+            ]
         }
     },
-    "minimum-stability": "dev",
+    "minimum-stability": "stable",
     "prefer-stable": true
 }
