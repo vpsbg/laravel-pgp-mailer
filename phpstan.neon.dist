@@ -7,11 +7,6 @@ parameters:
         - src
         - config
         - database
-    excludePaths:
-        # The HasPgpKey trait targets host user models, so phpstan can't infer
-        # the using class and would flag every $this->email / $this->getKey().
-        # Runtime behavior is covered by tests/Stubs/User.
-        - src/Concerns/HasPgpKey.php
     stubFiles:
         # Stub for the `gnupg` PECL extension. ext-gnupg is a composer require,
         # but phpstan can still analyze on hosts where the extension isn't loaded.
