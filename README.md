@@ -199,9 +199,9 @@ composer test
 
 The suite covers the engine round-trip, the listener policy matrix, attachment preservation, signing, and per-message opt-out paths. The `gnupg` PECL extension must be installed.
 
-## Changelog
+## Releases
 
-See [CHANGELOG.md](CHANGELOG.md).
+See the [GitHub Releases page](https://github.com/vpsbg/laravel-pgp-mailer/releases) for release notes per tag.
 
 ## License
 
