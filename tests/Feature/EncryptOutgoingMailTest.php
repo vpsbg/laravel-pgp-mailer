@@ -13,6 +13,7 @@ use Vpsbg\PgpMailer\Events\PgpEncryptionFailed;
 use Vpsbg\PgpMailer\Events\PgpSigningApplied;
 use Vpsbg\PgpMailer\Exceptions\EncryptionFailedException;
 use Vpsbg\PgpMailer\Exceptions\MissingRecipientKeyException;
+use Vpsbg\PgpMailer\Exceptions\MissingSenderKeyException;
 use Vpsbg\PgpMailer\Mime\PgpSignedPart;
 use Vpsbg\PgpMailer\Models\PgpKey;
 use Vpsbg\PgpMailer\PgpMailer;
@@ -530,7 +531,7 @@ it('throws MissingSenderKeyException under unmatched_sender_policy=fail', functi
             $m->to($this->recipientEmail);
             $m->subject('fail');
         });
-    })->toThrow(\Vpsbg\PgpMailer\Exceptions\MissingSenderKeyException::class);
+    })->toThrow(MissingSenderKeyException::class);
 
     expect(sentMessages())->toHaveCount(0);
 });

@@ -13,7 +13,7 @@ beforeEach(function (): void {
     $this->email = $this->fixtureEmail();
 });
 
-function validateKey(string $value, ValidPgpKey $rule): \Illuminate\Contracts\Validation\Validator
+function validateKey(string $value, ValidPgpKey $rule): Illuminate\Contracts\Validation\Validator
 {
     return Validator::make(['key' => $value], ['key' => [$rule]]);
 }

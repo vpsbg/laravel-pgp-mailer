@@ -6,6 +6,7 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
+use Vpsbg\PgpMailer\Contracts\KeyResolver;
 use Vpsbg\PgpMailer\Events\PgpKeyserverFetchFailed;
 use Vpsbg\PgpMailer\Events\PgpKeyserverFetchSucceeded;
 use Vpsbg\PgpMailer\Models\PgpKey;
@@ -193,7 +194,7 @@ it('is wired into the resolver chain when keyserver.enabled is true', function (
 
     // The KeyResolver binding is a chain when enabled — request through the
     // contract to confirm the wiring, not just the standalone class.
-    $resolver = $this->app->make(\Vpsbg\PgpMailer\Contracts\KeyResolver::class);
+    $resolver = $this->app->make(KeyResolver::class);
 
     $key = $resolver->forEmail($this->email);
 

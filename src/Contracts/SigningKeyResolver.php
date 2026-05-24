@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Vpsbg\PgpMailer\Contracts;
 
+use Vpsbg\PgpMailer\Exceptions\MissingSenderKeyException;
 use Vpsbg\PgpMailer\Support\SigningKey;
 
 interface SigningKeyResolver
@@ -19,7 +20,7 @@ interface SigningKeyResolver
      *                  if no default is configured.
      *   - Skip       — return null. The listener will skip signing for
      *                  this message.
-     *   - Fail       — throw {@see \Vpsbg\PgpMailer\Exceptions\MissingSenderKeyException}.
+     *   - Fail       — throw {@see MissingSenderKeyException}.
      *
      * The $fromAddress parameter is null when the outbound message carries
      * no From header at all; implementations should treat that the same as
