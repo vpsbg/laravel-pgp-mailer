@@ -27,17 +27,24 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        # PHP 8.2 is the declared floor; Laravel 11+12 only (composer.json
-        # constraint). Linux only — the package is server-side and the gnupg
-        # PECL build on Windows isn't worth the noise.
-        php: [8.2, 8.3, 8.4]
-        laravel: [11.*, 12.*]
+        # PHP 8.2 is the declared floor. Laravel 11+12 accept PHP ^8.2,
+        # Laravel 13 requires PHP ^8.3. Linux only — the package is
+        # server-side and the gnupg PECL build on Windows isn't worth the
+        # noise.
+        php: ['8.2', '8.3', '8.4', '8.5']
+        laravel: ['11.*', '12.*', '13.*']
         stability: [prefer-lowest, prefer-stable]
         include:
           - laravel: 11.*
             testbench: 9.*
           - laravel: 12.*
             testbench: 10.*
+          - laravel: 13.*
+            testbench: 11.*
+        exclude:
+          # Laravel 13 requires PHP ^8.3.
+          - laravel: 13.*
+            php: '8.2'
 
     name: P${{ matrix.php }} - L${{ matrix.laravel }} - ${{ matrix.stability }}
 

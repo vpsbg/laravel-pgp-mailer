@@ -9,13 +9,8 @@ use Stringable;
 
 final readonly class Fingerprint implements Stringable
 {
-    /** Uppercase hex, no separators. SHA-1 = 40 chars, SHA-256 = 64. */
-    public string $hex;
-
-    private function __construct(string $hex)
-    {
-        $this->hex = $hex;
-    }
+    /** @param string $hex Uppercase hex, no separators. SHA-1 = 40 chars, SHA-256 = 64. */
+    private function __construct(public string $hex) {}
 
     public static function fromHex(string $hex): self
     {

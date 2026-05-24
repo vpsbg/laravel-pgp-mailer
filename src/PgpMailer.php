@@ -31,4 +31,24 @@ final class PgpMailer
 
         return $mailable;
     }
+
+    /**
+     * Mark this Mailable instance to be signed but NOT encrypted, even when
+     * the recipients have stored PGP keys. Useful for signed newsletters or
+     * public announcements where confidentiality isn't required but
+     * authenticity is. If signing isn't configured globally, the listener
+     * is a no-op and this call has the same effect as {@see skip()}.
+     *
+     * Returns the same instance so it composes inline:
+     *
+     *     Mail::to($u)->send(PgpMailer::unencrypted(new NewsletterMail($data)));
+     */
+    public static function unencrypted(Mailable $mailable): Mailable
+    {
+        $mailable->withSymfonyMessage(function (Email $message): void {
+            $message->getHeaders()->addTextHeader(Headers::NO_ENCRYPT, '1');
+        });
+
+        return $mailable;
+    }
 }

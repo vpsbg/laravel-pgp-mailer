@@ -8,8 +8,10 @@ never used to sign or encrypt anything outside this repository.
 |---|---|
 | `recipient-public.asc` | Public key with UID `Gnupg Smoke <gnupg-smoke@test.local>`. RSA-2048 sign primary + RSA-2048 encrypt subkey (the shape real PGP clients produce; gpg refuses to encrypt to sign-only keys). |
 | `recipient-private.asc` | Matching private key, **no passphrase**. |
+| `signer-alt-public.asc` | A second, distinct keypair with UID `Gnupg Smoke Alt <gnupg-smoke-alt@test.local>`. Used by the per-sender signing tests so we can prove a given outbound message was signed with the alt key (its fingerprint differs from the recipient key's). |
+| `signer-alt-private.asc` | Matching private key, **no passphrase**. |
 
-To regenerate:
+To regenerate the recipient pair:
 
 ```bash
 TMP=$(mktemp -d) && chmod 700 "$TMP"
@@ -31,3 +33,6 @@ FPR=$(GNUPGHOME=$TMP gpg --list-keys --with-colons | awk -F: '/^fpr:/{print $10;
 GNUPGHOME=$TMP gpg --armor --export        "$FPR" > recipient-public.asc
 GNUPGHOME=$TMP gpg --armor --export-secret-keys "$FPR" > recipient-private.asc
 ```
+
+The alt signer pair is generated the same way; substitute `Name-Real: Gnupg Smoke Alt`
+and `Name-Email: gnupg-smoke-alt@test.local`, write to `signer-alt-*.asc`.

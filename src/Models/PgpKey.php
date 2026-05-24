@@ -156,15 +156,13 @@ class PgpKey extends Model
 
         $existing->fill($attributes + ['uid_mismatch_at' => null])->save();
 
-        if ($sameFingerprint) {
-            if ($hadMismatch) {
-                Event::dispatch(new PgpKeyUidRefreshed($existing));
-            }
-        } else {
+        if (! $sameFingerprint) {
             Event::dispatch(new PgpKeyRotated(
                 key: $existing,
                 previousFingerprint: Fingerprint::fromHex($previousFingerprint),
             ));
+        } elseif ($hadMismatch) {
+            Event::dispatch(new PgpKeyUidRefreshed($existing));
         }
 
         static::forgetCache($email);

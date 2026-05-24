@@ -12,8 +12,12 @@ use Spatie\LaravelPackageTools\Package;
 use Spatie\LaravelPackageTools\PackageServiceProvider;
 use Vpsbg\PgpMailer\Console\GenerateAppKey;
 use Vpsbg\PgpMailer\Contracts\KeyResolver;
+use Vpsbg\PgpMailer\Contracts\SigningKeyResolver;
 use Vpsbg\PgpMailer\Engines\GnupgExtensionEngine;
 use Vpsbg\PgpMailer\Listeners\EncryptOutgoingMail;
+use Vpsbg\PgpMailer\Resolvers\ChainKeyResolver;
+use Vpsbg\PgpMailer\Resolvers\ConfigSigningKeyResolver;
+use Vpsbg\PgpMailer\Resolvers\KeyserverKeyResolver;
 
 class PgpMailerServiceProvider extends PackageServiceProvider
 {
@@ -22,6 +26,7 @@ class PgpMailerServiceProvider extends PackageServiceProvider
         $package
             ->name('pgp-mailer')
             ->hasConfigFile()
+            ->hasTranslations()
             ->hasMigration('create_pgp_keys_table')
             ->hasCommand(GenerateAppKey::class);
     }
@@ -35,20 +40,33 @@ class PgpMailerServiceProvider extends PackageServiceProvider
         });
 
         $this->app->singleton(KeyResolver::class, function (Application $app) {
-            $class = (string) $app->make(ConfigRepository::class)->get('pgp-mailer.resolver');
+            $config = $app->make(ConfigRepository::class);
+            $innerClass = (string) $config->get('pgp-mailer.resolver');
+            $inner = $app->make($innerClass);
 
-            return $app->make($class);
+            if (! (bool) $config->get('pgp-mailer.keyserver.enabled', false)) {
+                return $inner;
+            }
+
+            return new ChainKeyResolver([
+                $inner,
+                $app->make(KeyserverKeyResolver::class),
+            ]);
+        });
+
+        $this->app->singleton(SigningKeyResolver::class, function (Application $app): SigningKeyResolver {
+            $class = $app->make(ConfigRepository::class)->get('pgp-mailer.signing.resolver');
+
+            return $app->make(is_string($class) && $class !== '' ? $class : ConfigSigningKeyResolver::class);
         });
     }
 
     public function packageBooted(): void
     {
         if ($this->app->runningInConsole()) {
-            // Short-form publish tags, in addition to the prefixed
-            // `pgp-mailer-config` / `pgp-mailer-migrations` tags registered by
-            // spatie/laravel-package-tools. Lets the user run
-            //   php artisan vendor:publish --provider="..." --tag="config"
-            // which is the convention used by many ecosystem packages.
+            // Short-form `config` / `migrations` publish tags in addition to
+            // the prefixed `pgp-mailer-config` / `pgp-mailer-migrations` tags
+            // registered by spatie/laravel-package-tools.
             $this->publishes([
                 __DIR__.'/../config/pgp-mailer.php' => config_path('pgp-mailer.php'),
             ], 'config');
@@ -58,6 +76,10 @@ class PgpMailerServiceProvider extends PackageServiceProvider
                     'migrations/'.date('Y_m_d_His').'_create_pgp_keys_table.php'
                 ),
             ], 'migrations');
+
+            $this->publishes([
+                __DIR__.'/../resources/lang' => $this->app->langPath('vendor/pgp-mailer'),
+            ], 'lang');
         }
 
         if (! $this->app->make(ConfigRepository::class)->get('pgp-mailer.enabled', true)) {

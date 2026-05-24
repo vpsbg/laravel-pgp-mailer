@@ -5,17 +5,23 @@ declare(strict_types=1);
 namespace Vpsbg\PgpMailer\Support;
 
 /**
- * Wire-level header names. All three are stripped before transport so they
- * never reach recipients.
+ * Wire-level header names. OPT_OUT and NO_ENCRYPT are stripped before
+ * transport so they never reach recipients. APPLIED is intentionally left
+ * on the wire so downstream tooling (mail logs, audit pipelines, transport
+ * middleware) can detect that PGP was applied.
  */
 final class Headers
 {
-    /** Internal marker on the listener's own re-dispatched plaintext copy, to prevent re-entry. */
-    public const SKIP = 'X-Pgp-Mailer-Skip';
-
-    /** Caller-controlled opt-out (set via {@see PgpMailer::skip()} or a Mailable's headers()). */
+    /** Caller-controlled "bypass PGP entirely" (set via {@see PgpMailer::skip()} or a Mailable's headers()). */
     public const OPT_OUT = 'X-Pgp-Mailer-Disable';
 
-    /** Stamped on the encrypted copy so downstream observers can tell. */
+    /**
+     * Caller-controlled "do not encrypt this message" (set via
+     * {@see PgpMailer::unencrypted()} or a Mailable's headers()). The
+     * message is still signed if signing is configured globally.
+     */
+    public const NO_ENCRYPT = 'X-Pgp-Mailer-No-Encrypt';
+
+    /** Stamped on the PGP-processed copy so downstream observers can tell. Stays on the wire. */
     public const APPLIED = 'X-Pgp-Mailer-Applied';
 }
