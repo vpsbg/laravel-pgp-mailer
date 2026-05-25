@@ -567,7 +567,7 @@ it('replaces outer Subject with the configured placeholder and embeds the real S
     Mail::to($this->recipientEmail)->send(new PlainMailable('protected body'));
 
     $email = sentMessages()[0]->getOriginalMessage();
-    expect($email->getSubject())->toBe('...');
+    expect($email->getSubject())->toBe('Encrypted Subject');
 
     $recovered = recoverEncrypted($email->toString(), $this->keys['private']);
     expect($recovered)->toContain('Subject: Test');
@@ -634,7 +634,7 @@ it('also protects Subject on the sign-only path when recipient has no key', func
     Mail::to($this->recipientEmail)->send(new PlainMailable('sign-only body'));
 
     $email = sentMessages()[0]->getOriginalMessage();
-    expect($email->getSubject())->toBe('...');
+    expect($email->getSubject())->toBe('Encrypted Subject');
 
     // Body is cleartext between the multipart/signed boundaries — the inner
     // Subject header is visible in the serialized output.
@@ -706,7 +706,7 @@ it('protects Subject on the secondary signed copy in the split-recipients path',
 
     foreach ($sent as $msg) {
         $email = $msg->getOriginalMessage();
-        expect($email->getSubject())->toBe('...');
+        expect($email->getSubject())->toBe('Encrypted Subject');
     }
 
     $signedCopy = null;
