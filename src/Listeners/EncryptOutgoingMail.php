@@ -13,6 +13,7 @@ use Psr\Log\LoggerInterface;
 use Symfony\Component\Mailer\Envelope;
 use Symfony\Component\Mime\Address;
 use Symfony\Component\Mime\Email;
+use Symfony\Component\Mime\Part\AbstractPart;
 use Throwable;
 use Vpsbg\PgpMailer\Contracts\KeyResolver;
 use Vpsbg\PgpMailer\Contracts\MissingKeyPolicy;
@@ -69,11 +70,15 @@ class EncryptOutgoingMail
 
         $recipients = $this->collectRecipients($email);
         if ($recipients === []) {
+            $headers->remove(Headers::VISIBLE_SUBJECT);
+
             return null;
         }
 
+        $protectedSubject = $this->extractProtectedSubject($email);
+
         if ($userNoEncrypt) {
-            return $this->executeSignOnly($email, $recipients, $this->loadSigningCredentials($email));
+            return $this->executeSignOnly($email, $recipients, $this->loadSigningCredentials($email), $protectedSubject);
         }
 
         try {
@@ -81,7 +86,7 @@ class EncryptOutgoingMail
         } catch (Throwable $e) {
             $this->log('error', 'key resolution failed; falling back to sign-only', ['exception' => $e::class]);
 
-            return $this->executeSignOnly($email, $recipients, $this->loadSigningCredentials($email));
+            return $this->executeSignOnly($email, $recipients, $this->loadSigningCredentials($email), $protectedSubject);
         }
 
         $missing = array_values(array_diff($recipients, array_keys($keys)));
@@ -93,7 +98,7 @@ class EncryptOutgoingMail
                 return false;
             }
             if ($resolution === 'sign_only') {
-                return $this->executeSignOnly($email, $recipients, $this->loadSigningCredentials($email));
+                return $this->executeSignOnly($email, $recipients, $this->loadSigningCredentials($email), $protectedSubject);
             }
             // 'continue' — encrypt with the keys we have; split flow handles the rest.
         }
@@ -105,14 +110,14 @@ class EncryptOutgoingMail
         $signingKey = $this->loadSigningCredentials($email);
 
         if ($keys === [] || $signingKey === null) {
-            return $this->executeSignOnly($email, $recipients, $signingKey);
+            return $this->executeSignOnly($email, $recipients, $signingKey, $protectedSubject);
         }
 
-        return $this->executeEncrypt($email, $keys, $missing, $policy, $signingKey);
+        return $this->executeEncrypt($email, $keys, $missing, $policy, $signingKey, $protectedSubject);
     }
 
     /** @param  list<string>  $recipients */
-    private function executeSignOnly(Email $email, array $recipients, ?SigningKey $signingKey): ?bool
+    private function executeSignOnly(Email $email, array $recipients, ?SigningKey $signingKey, ?string $protectedSubject): ?bool
     {
         if ($signingKey === null) {
             // signingEnabled() said yes but no key actually resolved for
@@ -123,6 +128,10 @@ class EncryptOutgoingMail
 
         $body = $email->getBody();
 
+        if ($protectedSubject !== null) {
+            $this->applyProtectedHeadersToBody($body, $protectedSubject);
+        }
+
         try {
             $signature = $this->engine->sign($body->toString(), $signingKey->armored, $signingKey->passphrase);
         } catch (Throwable $e) {
@@ -131,6 +140,10 @@ class EncryptOutgoingMail
 
         $email->setBody(PgpMimeBuilder::wrapSigned($body, $signature));
         $email->getHeaders()->addTextHeader(Headers::APPLIED, '1');
+
+        if ($protectedSubject !== null) {
+            $this->rewriteOuterSubject($email);
+        }
 
         $this->events->dispatch(new PgpSigningApplied(recipients: $recipients));
 
@@ -147,7 +160,12 @@ class EncryptOutgoingMail
         array $missing,
         MissingKeyPolicy $policy,
         SigningKey $signingKey,
+        ?string $protectedSubject,
     ): ?bool {
+        if ($protectedSubject !== null) {
+            $this->applyProtectedHeadersToBody($email->getBody(), $protectedSubject);
+        }
+
         try {
             $ciphertext = $this->engine->encrypt(
                 $email->getBody()->toString(),
@@ -164,11 +182,15 @@ class EncryptOutgoingMail
         if ($missing !== [] && $policy === MissingKeyPolicy::SignOnly && $this->splitRecipientsEnabled()) {
             $missingAddresses = $this->extractAddresses($email, $missing);
             $this->restrictRecipientsTo($email, array_keys($keys));
-            $this->dispatchSecondaryCopy($email, $missingAddresses, $signingKey);
+            $this->dispatchSecondaryCopy($email, $missingAddresses, $signingKey, $protectedSubject);
         }
 
         $email->setBody(PgpMimeBuilder::wrap($ciphertext));
         $email->getHeaders()->addTextHeader(Headers::APPLIED, '1');
+
+        if ($protectedSubject !== null) {
+            $this->rewriteOuterSubject($email);
+        }
 
         $this->events->dispatch(new PgpEncryptionApplied(
             recipients: array_keys($keys),
@@ -288,7 +310,7 @@ class EncryptOutgoingMail
      *
      * @param  array{to: list<Address>, cc: list<Address>, bcc: list<Address>}  $missingAddresses
      */
-    private function dispatchSecondaryCopy(Email $email, array $missingAddresses, SigningKey $signingKey): void
+    private function dispatchSecondaryCopy(Email $email, array $missingAddresses, SigningKey $signingKey, ?string $protectedSubject): void
     {
         if ($missingAddresses['to'] === [] && $missingAddresses['cc'] === [] && $missingAddresses['bcc'] === []) {
             return;
@@ -301,9 +323,16 @@ class EncryptOutgoingMail
 
         try {
             $body = $copy->getBody();
+            // The clone already inherited the inner Subject header that
+            // executeEncrypt() added to $email->getBody() before us, so the
+            // signed payload is identically protected. We only need to
+            // rewrite the outer Subject on the copy here.
             $signature = $this->engine->sign($body->toString(), $signingKey->armored, $signingKey->passphrase);
             $copy->setBody(PgpMimeBuilder::wrapSigned($body, $signature));
             $copy->getHeaders()->addTextHeader(Headers::APPLIED, '1');
+            if ($protectedSubject !== null) {
+                $this->rewriteOuterSubject($copy);
+            }
             $this->events->dispatch(new PgpSigningApplied(recipients: $this->collectRecipients($copy)));
         } catch (Throwable $e) {
             $this->log('error', 'signing the secondary copy failed; dropping it', [
@@ -363,6 +392,73 @@ class EncryptOutgoingMail
     private function splitRecipientsEnabled(): bool
     {
         return (bool) $this->config->get('pgp-mailer.sign_only.split_recipients', true);
+    }
+
+    /**
+     * Decide whether protected headers apply to this message and return the
+     * Subject that should be embedded inside the signed/encrypted body. The
+     * per-message opt-out header is stripped here so it never reaches the
+     * wire even when protection is disabled globally. Returns null when
+     * either the feature is off, the caller opted out, or the Email has no
+     * Subject worth protecting.
+     */
+    private function extractProtectedSubject(Email $email): ?string
+    {
+        $headers = $email->getHeaders();
+        $optOut = $headers->has(Headers::VISIBLE_SUBJECT);
+        $headers->remove(Headers::VISIBLE_SUBJECT);
+
+        if ($optOut) {
+            return null;
+        }
+
+        if (! (bool) $this->config->get('pgp-mailer.protected_headers.enabled', false)) {
+            return null;
+        }
+
+        $subject = $email->getSubject();
+
+        return ($subject !== null && $subject !== '') ? $subject : null;
+    }
+
+    /**
+     * Rewrite the outer Subject with the configured placeholder. Called
+     * after the engine has successfully produced its sign/encrypt payload —
+     * if anything earlier in the path throws, the original Subject stays
+     * visible (the inner-body Subject header we already added is harmless
+     * to a discarded Email object).
+     */
+    private function rewriteOuterSubject(Email $email): void
+    {
+        $placeholder = (string) $this->config->get('pgp-mailer.protected_headers.placeholder_subject', '...');
+        $email->subject($placeholder);
+    }
+
+    /**
+     * Attach the protected Subject to the inner body part and mark its
+     * Content-Type with `protected-headers="v1"`. The marker is the
+     * recognition cue from draft-ietf-lamps-header-protection that
+     * modern MUAs (Thunderbird's RNP-based OpenPGP, recent Apple Mail)
+     * require before they swap the displayed Subject for the inner one.
+     * Legacy memory-hole MUAs (ProtonMail, K-9) swap on the inner Subject
+     * header alone and ignore the extra Content-Type parameter, so this
+     * is additive — no MUA that worked before regresses.
+     *
+     * Implementation note: we pre-set Content-Type as a ParameterizedHeader
+     * on the part's raw header collection. When the part's
+     * getPreparedHeaders() later calls setHeaderBody('Content-Type', ...),
+     * Symfony updates only the header value (e.g. "text/html"); parameters
+     * stored on ParameterizedHeader survive the update. See
+     * Symfony\Component\Mime\Header\ParameterizedHeader::$parameters.
+     */
+    private function applyProtectedHeadersToBody(AbstractPart $body, string $subject): void
+    {
+        $body->getHeaders()->addTextHeader('Subject', $subject);
+        $body->getHeaders()->addParameterizedHeader(
+            'Content-Type',
+            $body->getMediaType().'/'.$body->getMediaSubtype(),
+            ['protected-headers' => 'v1'],
+        );
     }
 
     /** @param  array<string, mixed>  $context */

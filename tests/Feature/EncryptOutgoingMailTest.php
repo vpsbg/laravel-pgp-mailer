@@ -559,6 +559,176 @@ it('preserves the legacy single-key install when senders is empty', function ():
         ->toBe('5C86E8EFCD946F05FDCC99A3F6AD4E436EB07FD0');
 });
 
+// === Protected Headers (encrypted Subject) =============================
+
+it('replaces outer Subject with the configured placeholder and embeds the real Subject in the encrypted body', function (): void {
+    config()->set('pgp-mailer.protected_headers.enabled', true);
+
+    Mail::to($this->recipientEmail)->send(new PlainMailable('protected body'));
+
+    $email = sentMessages()[0]->getOriginalMessage();
+    expect($email->getSubject())->toBe('...');
+
+    $recovered = recoverEncrypted($email->toString(), $this->keys['private']);
+    expect($recovered)->toContain('Subject: Test');
+    expect($recovered)->toContain('protected body');
+});
+
+it('marks the inner encrypted part with protected-headers=v1 so Thunderbird swaps the Subject', function (): void {
+    config()->set('pgp-mailer.protected_headers.enabled', true);
+
+    Mail::to($this->recipientEmail)->send(new PlainMailable('payload'));
+
+    $recovered = recoverEncrypted(
+        sentMessages()[0]->getOriginalMessage()->toString(),
+        $this->keys['private'],
+    );
+
+    // Order of parameters on Content-Type is not guaranteed; match either.
+    expect($recovered)->toMatch('/Content-Type:[^\r\n]*protected-headers="?v1"?/');
+});
+
+it('marks the inner signed part with protected-headers=v1 on the sign-only path', function (): void {
+    PgpKey::query()->delete();
+    config()->set('pgp-mailer.missing_key_policy', 'sign_only');
+    config()->set('pgp-mailer.protected_headers.enabled', true);
+
+    Mail::to($this->recipientEmail)->send(new PlainMailable('payload'));
+
+    $serialized = sentMessages()[0]->getOriginalMessage()->toString();
+    expect($serialized)->toMatch('/Content-Type:[^\r\n]*protected-headers="?v1"?/');
+});
+
+it('does not emit the v1 marker when the visible-subject opt-out is used', function (): void {
+    config()->set('pgp-mailer.protected_headers.enabled', true);
+
+    $mailable = new PlainMailable('payload');
+    Mail::to($this->recipientEmail)->send(PgpMailer::withVisibleSubject($mailable));
+
+    $recovered = recoverEncrypted(
+        sentMessages()[0]->getOriginalMessage()->toString(),
+        $this->keys['private'],
+    );
+
+    expect($recovered)->not->toContain('protected-headers');
+});
+
+it('respects a custom placeholder_subject', function (): void {
+    config()->set('pgp-mailer.protected_headers.enabled', true);
+    config()->set('pgp-mailer.protected_headers.placeholder_subject', '[Encrypted Message]');
+
+    Mail::to($this->recipientEmail)->send(new PlainMailable('payload'));
+
+    $email = sentMessages()[0]->getOriginalMessage();
+    expect($email->getSubject())->toBe('[Encrypted Message]');
+
+    expect(recoverEncrypted($email->toString(), $this->keys['private']))
+        ->toContain('Subject: Test');
+});
+
+it('also protects Subject on the sign-only path when recipient has no key', function (): void {
+    PgpKey::query()->delete();
+    config()->set('pgp-mailer.missing_key_policy', 'sign_only');
+    config()->set('pgp-mailer.protected_headers.enabled', true);
+
+    Mail::to($this->recipientEmail)->send(new PlainMailable('sign-only body'));
+
+    $email = sentMessages()[0]->getOriginalMessage();
+    expect($email->getSubject())->toBe('...');
+
+    // Body is cleartext between the multipart/signed boundaries — the inner
+    // Subject header is visible in the serialized output.
+    $serialized = $email->toString();
+    expect($serialized)->toContain('multipart/signed');
+    expect($serialized)->toContain('Subject: Test');
+    expect($serialized)->toContain('sign-only body');
+});
+
+it('keeps the outer Subject visible per-message via the X-Pgp-Mailer-Visible-Subject header', function (): void {
+    config()->set('pgp-mailer.protected_headers.enabled', true);
+
+    Mail::raw('payload', function ($m): void {
+        $m->to($this->recipientEmail);
+        $m->subject('Invoice #4242');
+        $m->getSymfonyMessage()->getHeaders()->addTextHeader('X-Pgp-Mailer-Visible-Subject', '1');
+    });
+
+    $email = sentMessages()[0]->getOriginalMessage();
+    expect($email->getSubject())->toBe('Invoice #4242');
+    expect($email->toString())->not->toContain('X-Pgp-Mailer-Visible-Subject');
+});
+
+it('PgpMailer::withVisibleSubject keeps the outer Subject visible', function (): void {
+    config()->set('pgp-mailer.protected_headers.enabled', true);
+
+    $mailable = new PlainMailable('payload');
+    Mail::to($this->recipientEmail)->send(PgpMailer::withVisibleSubject($mailable));
+
+    $email = sentMessages()[0]->getOriginalMessage();
+    expect($email->getSubject())->toBe('Test');
+    expect($email->toString())->not->toContain('X-Pgp-Mailer-Visible-Subject');
+});
+
+it('PgpMailer::withVisibleSubject returns the same Mailable instance', function (): void {
+    $mailable = new PlainMailable('whatever');
+
+    expect(PgpMailer::withVisibleSubject($mailable))->toBe($mailable);
+});
+
+it('does not touch the outer Subject when protected_headers is disabled (default)', function (): void {
+    Mail::to($this->recipientEmail)->send(new PlainMailable('payload'));
+
+    expect(sentMessages()[0]->getOriginalMessage()->getSubject())->toBe('Test');
+});
+
+it('strips the visible-subject opt-out header even when protected_headers is disabled', function (): void {
+    Mail::raw('payload', function ($m): void {
+        $m->to($this->recipientEmail);
+        $m->subject('Invoice #4242');
+        $m->getSymfonyMessage()->getHeaders()->addTextHeader('X-Pgp-Mailer-Visible-Subject', '1');
+    });
+
+    expect(sentMessages()[0]->getOriginalMessage()->toString())
+        ->not->toContain('X-Pgp-Mailer-Visible-Subject');
+});
+
+it('protects Subject on the secondary signed copy in the split-recipients path', function (): void {
+    config()->set('pgp-mailer.protected_headers.enabled', true);
+    config()->set('pgp-mailer.missing_key_policy', 'sign_only');
+    config()->set('pgp-mailer.sign_only.split_recipients', true);
+
+    Mail::to('nobody-with-no-key@example.com')
+        ->bcc($this->recipientEmail)
+        ->send(new PlainMailable('split payload'));
+
+    $sent = sentMessages();
+    expect(count($sent))->toBeGreaterThanOrEqual(2);
+
+    foreach ($sent as $msg) {
+        $email = $msg->getOriginalMessage();
+        expect($email->getSubject())->toBe('...');
+    }
+
+    $signedCopy = null;
+    foreach ($sent as $msg) {
+        if (str_contains($msg->getOriginalMessage()->toString(), 'multipart/signed')) {
+            $signedCopy = $msg->getOriginalMessage();
+            break;
+        }
+    }
+    expect($signedCopy)->not->toBeNull();
+    expect($signedCopy->toString())->toContain('Subject: Test');
+});
+
+it('does not rewrite the outer Subject when the listener is a no-op (signing disabled)', function (): void {
+    config()->set('pgp-mailer.protected_headers.enabled', true);
+    config()->set('pgp-mailer.signing.enabled', false);
+
+    Mail::to($this->recipientEmail)->send(new PlainMailable('payload'));
+
+    expect(sentMessages()[0]->getOriginalMessage()->getSubject())->toBe('Test');
+});
+
 function bindThrowingEngine(): void
 {
     // Subclass the real engine so parsePublicKey still works (the resolver
