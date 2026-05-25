@@ -1,3 +1,8 @@
+# WARNING: this workflow uses `pull_request_target`, which runs in the base-branch
+# context with write access to the repo. It is safe ONLY because it never checks
+# out the PR's code (no `actions/checkout`) and only calls `gh pr merge`.
+# DO NOT add `actions/checkout` or run any PR-supplied script/command here — that
+# would let any fork PR execute arbitrary code with our GITHUB_TOKEN.
 name: dependabot-auto-merge
 on: pull_request_target
 
@@ -14,7 +19,7 @@ jobs:
 
       - name: Dependabot metadata
         id: metadata
-        uses: dependabot/fetch-metadata@v3.1.0
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
 
