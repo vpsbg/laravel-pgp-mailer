@@ -1,66 +1,118 @@
 name: Bug Report
-description: Report an Issue or Bug with the Package
+description: Report a bug in laravel-pgp-mailer
 title: "[Bug]: "
 labels: ["bug"]
 body:
-    - type: markdown
-      attributes:
-          value: |
-              We're sorry to hear you have a problem. Can you help us solve it by providing the following details.
-    - type: textarea
-      id: what-happened
-      attributes:
-          label: What happened?
-          description: What did you expect to happen?
-          placeholder: I cannot currently do X thing because when I do, it breaks X thing.
-      validations:
-          required: true
-    - type: textarea
-      id: how-to-reproduce
-      attributes:
-          label: How to reproduce the bug
-          description: How did this occur, please add any config values used and provide a set of reliable steps if possible.
-          placeholder: When I do X I see Y.
-      validations:
-          required: true
-    - type: input
-      id: package-version
-      attributes:
-          label: Package Version
-          description: What version of our Package are you running? Please be as specific as possible
-          placeholder: 2.0.0
-      validations:
-          required: true
-    - type: input
-      id: php-version
-      attributes:
-          label: PHP Version
-          description: What version of PHP are you running? Please be as specific as possible
-          placeholder: 8.2.0
-      validations:
-          required: true
-    - type: input
-      id: laravel-version
-      attributes:
-        label: Laravel Version
-        description: What version of Laravel are you running? Please be as specific as possible
-        placeholder: 9.0.0
-      validations:
-        required: true
-    - type: dropdown
-      id: operating-systems
-      attributes:
-        label: Which operating systems does this happen with?
-        description: You may select more than one.
-        multiple: true
-        options:
-        - macOS
-        - Windows
-        - Linux
-    - type: textarea
-      id: notes
-      attributes:
-          label: Notes
-          description: Use this field to provide any other notes that you feel might be relevant to the issue.
-      validations:
-          required: false
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Before submitting, please check
+        existing issues to avoid duplicates. For **security-sensitive bugs**
+        (e.g. key leakage, plaintext on the wire), please use
+        [private vulnerability reporting](https://github.com/vpsbg/laravel-pgp-mailer/security/advisories/new)
+        instead of this form.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences — what went wrong?
+      placeholder: "Mail::to() with a recipient that has a stored key sends plaintext instead of multipart/encrypted."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: |
+        Minimal steps to reproduce. Include the relevant `pgp-mailer` config
+        values, the `PgpKey::store()` call (or how the key got into the DB),
+        and the `Mail::to(...)->send(...)` call. Code blocks welcome.
+      placeholder: |
+        1. config('pgp-mailer.signing.enabled') = true, signing key set via env
+        2. PgpKey::store('user@example.com', file_get_contents('key.asc'))
+        3. Mail::to('user@example.com')->send(new InvoiceMail($invoice))
+        4. Mailpit shows text/plain, not multipart/encrypted
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behavior
+      placeholder: |
+        Expected: multipart/encrypted with embedded signature
+        Actual:   text/plain, no PGP processing
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Paste the output of:
+        ```
+        composer show vpsbg/laravel-pgp-mailer | grep -E 'versions|name'
+        php -v
+        php -r 'echo extension_loaded("gnupg") ? "gnupg: loaded\n" : "gnupg: MISSING\n";'
+        php -r 'echo "laravel: " . \Illuminate\Foundation\Application::VERSION . "\n";' 2>/dev/null || true
+        ```
+      render: shell
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Which path is affected?
+      description: Best-guess is fine — you can tick more than one.
+      multiple: true
+      options:
+        - Sign+encrypt (multipart/encrypted)
+        - Sign-only (multipart/signed)
+        - Split-recipients (mixed keyed/unkeyed audience)
+        - Opt-out headers (X-Pgp-Mailer-Disable / -No-Encrypt)
+        - Key storage / rotation / UID refresh (PgpKey::store)
+        - Listener is unexpectedly a no-op
+        - Engine / gnupg PECL interaction
+        - Other / unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: relevant-config
+    attributes:
+      label: Relevant config values
+      description: |
+        Only the knobs that matter — don't paste the whole config file.
+        Common ones: `missing_key_policy`, `engine_failure_policy`,
+        `unmatched_sender_policy`, `signing.enabled`, `sign_only.split_recipients`,
+        `require_uid_match`, `homedir`.
+      render: php
+      placeholder: |
+        'missing_key_policy' => 'sign_only',
+        'engine_failure_policy' => 'drop',
+        'sign_only' => ['split_recipients' => true],
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error / stack trace / logs
+      description: |
+        Any exception trace, `laravel.log` excerpt, or stderr output from the
+        gnupg engine. Redact key material and recipient addresses.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything else that might be relevant (Horizon vs sync queue, persistent vs ephemeral homedir, mail driver, etc.)
+    validations:
+      required: false
