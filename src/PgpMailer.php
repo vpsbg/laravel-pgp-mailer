@@ -51,4 +51,24 @@ final class PgpMailer
 
         return $mailable;
     }
+
+    /**
+     * Mark this Mailable instance to keep its outer Subject visible on the
+     * wire even when `protected_headers.enabled` is true globally. Useful
+     * for transactional mail where the Subject must remain searchable /
+     * threadable for recipients whose MUAs don't understand memory-hole
+     * headers. No-op when protected headers are disabled in config.
+     *
+     * Returns the same instance so it composes inline:
+     *
+     *     Mail::to($u)->send(PgpMailer::withVisibleSubject(new InvoiceMail($data)));
+     */
+    public static function withVisibleSubject(Mailable $mailable): Mailable
+    {
+        $mailable->withSymfonyMessage(function (Email $message): void {
+            $message->getHeaders()->addTextHeader(Headers::VISIBLE_SUBJECT, '1');
+        });
+
+        return $mailable;
+    }
 }

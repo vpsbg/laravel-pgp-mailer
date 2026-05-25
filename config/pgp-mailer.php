@@ -186,6 +186,38 @@ return [
         'lock_prefix' => env('PGP_MAIL_KEYSERVER_LOCK_PREFIX', 'pgp-mailer:ks-fetch:'),
     ],
 
+    /*
+    | Protected Headers (encrypted Subject line).
+    |
+    | When enabled, the listener copies the outer Subject into the inner
+    | encrypted-or-signed MIME part and replaces the outer Subject with
+    | `placeholder_subject` before the message goes on the wire. The inner
+    | part is marked with `Content-Type: ...; protected-headers="v1"` per
+    | draft-ietf-lamps-header-protection AND carries the legacy memory-hole
+    | `Subject:` header, so both modern MUAs (Thunderbird, recent Apple
+    | Mail) and legacy ones (ProtonMail, K-9) display the real Subject
+    | after decryption. MUAs that recognize neither show the placeholder
+    | in their inbox list but still decrypt the body normally.
+    |
+    | Trade-offs to consider before flipping this on:
+    |   - Threading by Subject collapses for non-supporting MUAs (modern
+    |     MUAs thread by Message-ID/In-Reply-To and are unaffected).
+    |   - Server-side subject search (Gmail web, etc.) becomes impossible.
+    |
+    | Per-message opt-out via the X-Pgp-Mailer-Visible-Subject header on
+    | the Mailable (or {@see PgpMailer::withVisibleSubject()}) keeps the
+    | outer Subject visible for that specific send.
+    */
+    'protected_headers' => [
+        // Master switch. Default off — flipping this on changes how
+        // outer Subject lines appear to every recipient, including the
+        // ones whose MUA doesn't support protected headers.
+        'enabled' => env('PGP_MAIL_PROTECTED_HEADERS', false),
+        // What the outer Subject is rewritten to when protection is
+        // applied. Matches ProtonMail's default for cross-MUA familiarity.
+        'placeholder_subject' => env('PGP_MAIL_PROTECTED_HEADERS_PLACEHOLDER', 'Encrypted Subject'),
+    ],
+
     // When true, PgpKey::store() rejects keys whose UID does not contain
     // the email it's being stored under. Disable only for fixtures or
     // legacy keys that pre-date the email-on-UID convention.

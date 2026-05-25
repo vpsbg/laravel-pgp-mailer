@@ -10,7 +10,6 @@ use Illuminate\Mail\Events\MessageSending;
 use Illuminate\Support\Facades\Event;
 use Spatie\LaravelPackageTools\Package;
 use Spatie\LaravelPackageTools\PackageServiceProvider;
-use Vpsbg\PgpMailer\Console\GenerateAppKey;
 use Vpsbg\PgpMailer\Contracts\KeyResolver;
 use Vpsbg\PgpMailer\Contracts\SigningKeyResolver;
 use Vpsbg\PgpMailer\Engines\GnupgExtensionEngine;
@@ -27,8 +26,7 @@ class PgpMailerServiceProvider extends PackageServiceProvider
             ->name('pgp-mailer')
             ->hasConfigFile()
             ->hasTranslations()
-            ->hasMigration('create_pgp_keys_table')
-            ->hasCommand(GenerateAppKey::class);
+            ->hasMigration('create_pgp_keys_table');
     }
 
     public function registeringPackage(): void
@@ -64,8 +62,9 @@ class PgpMailerServiceProvider extends PackageServiceProvider
     public function packageBooted(): void
     {
         if ($this->app->runningInConsole()) {
-            // Short-form `config` / `migrations` publish tags in addition to
-            // the prefixed `pgp-mailer-config` / `pgp-mailer-migrations` tags
+            // Short-form `config` / `migrations` / `translations` publish tags
+            // in addition to the prefixed `pgp-mailer-config` /
+            // `pgp-mailer-migrations` / `pgp-mailer-translations` tags
             // registered by spatie/laravel-package-tools.
             $this->publishes([
                 __DIR__.'/../config/pgp-mailer.php' => config_path('pgp-mailer.php'),
@@ -79,7 +78,7 @@ class PgpMailerServiceProvider extends PackageServiceProvider
 
             $this->publishes([
                 __DIR__.'/../resources/lang' => $this->app->langPath('vendor/pgp-mailer'),
-            ], 'lang');
+            ], 'translations');
         }
 
         if (! $this->app->make(ConfigRepository::class)->get('pgp-mailer.enabled', true)) {
