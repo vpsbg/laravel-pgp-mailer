@@ -53,7 +53,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6.0.0
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup PHP
         uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
@@ -76,6 +76,13 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # Composer 2.10+ refuses to resolve packages with open security
+          # advisories. The Laravel 11 line no longer receives fixes, so its
+          # advisories are permanent and every L11 matrix job would fail at
+          # resolution. This is a test matrix, not a deployment — disable the
+          # block here (CI checkout only; the committed composer.json keeps
+          # the default policy).
+          composer config policy.advisories.block false
           composer require "laravel/framework:${{ matrix.laravel }}" "orchestra/testbench:${{ matrix.testbench }}" --no-interaction --no-update
           composer update --${{ matrix.stability }} --prefer-dist --no-interaction
 
